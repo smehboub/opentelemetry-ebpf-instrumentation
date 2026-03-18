@@ -388,6 +388,11 @@
           "$ref": "#/$defs/LogEnricherConfig",
           "description": "Log trace-context enricher config"
         },
+        "max_request_tp_parse_size_kb": {
+          "type": "integer",
+          "description": "Maximum size in kilobytes to parse for traceparent in HTTP requests",
+          "x-env-var": "OTEL_EBPF_BPF_MAX_REQUEST_TP_PARSE_SIZE_KB"
+        },
         "max_transaction_time": {
           "type": "string",
           "pattern": "^[0-9]+(ms|s|m)$",

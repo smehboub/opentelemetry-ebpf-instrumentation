@@ -136,6 +136,7 @@ var DefaultConfig = Config{
 		KafkaTopicUUIDCacheSize:             1024,
 		CouchbaseDBCacheSize:                1024,
 		OverrideBPFLoopEnabled:              false,
+		MaxRequestTPParseSizeKB:             4,
 		PayloadExtraction: config.PayloadExtraction{
 			HTTP: config.HTTPConfig{
 				GraphQL: config.GraphQLConfig{

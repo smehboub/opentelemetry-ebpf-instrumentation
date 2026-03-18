@@ -125,6 +125,9 @@ type EBPFTracer struct {
 
 	// BPF path used to pin eBPF maps
 	BPFFSPath string `yaml:"bpf_fs_path" env:"OTEL_EBPF_BPF_FS_PATH"`
+
+	// Maximum size in kilobytes to parse for traceparent in HTTP requests
+	MaxRequestTPParseSizeKB int `yaml:"max_request_tp_parse_size_kb" env:"OTEL_EBPF_BPF_MAX_REQUEST_TP_PARSE_SIZE_KB" validate:"gte=4,lte=32"`
 }
 
 var nvidiaSMIExistsFunc = nvidiaSMIExists

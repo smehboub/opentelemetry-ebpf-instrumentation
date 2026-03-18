@@ -59,6 +59,7 @@ func TestTraceparentExtraction(t *testing.T) {
 	t.Run("without_traceparent", testWithoutTraceparent)
 	t.Run("with_traceparent", testWithTraceparent)
 	t.Run("with_forwarded_traceparent", testWithForwardedTraceparent)
+	t.Run("with_huge_headers_traceparent", testWithHugeHeadersTraceparent)
 
 	require.NoError(t, compose.Close())
 }
@@ -180,6 +181,36 @@ func testWithForwardedTraceparent(t *testing.T) {
 		"eBPF should override forwarded span IDs (not all spans should have %s)", forwardedSpanID)
 
 	// Verify we have spans from all 3 services in the chain
+	require.GreaterOrEqual(t, len(trace.Spans), 3,
+		"Should have spans from all services in the chain (a, b, c)")
+}
+
+// testWithHugeHeadersTraceparent validates that when a large filler header (>2KB)
+// precedes the Traceparent header, the eBPF chunked tail-call parser still finds it.
+func testWithHugeHeadersTraceparent(t *testing.T) {
+	ti.DoHTTPGet(t, "http://localhost:6000/with-huge-tp", 200)
+
+	var trace jaeger.Trace
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		resp, err := http.Get(jaegerQueryURL + "?service=tpclient-a&traceID=" + staticTraceID)
+		require.NoError(ct, err)
+		require.Equal(ct, http.StatusOK, resp.StatusCode)
+
+		var tq jaeger.TracesQuery
+		require.NoError(ct, json.NewDecoder(resp.Body).Decode(&tq))
+
+		traces := tq.FindBySpan(jaeger.Tag{Key: "url.path", Type: "string", Value: "/with-huge-tp"})
+		require.GreaterOrEqual(ct, len(traces), 1, "should find trace with huge headers + traceparent")
+		trace = traces[0]
+		require.NotEmpty(ct, trace.Spans)
+	}, testTimeout, 100*time.Millisecond)
+
+	// CRITICAL: All spans must have the static trace ID, proving chunked extraction worked
+	for _, span := range trace.Spans {
+		require.Equal(t, staticTraceID, span.TraceID,
+			"eBPF chunked parser should extract the static trace ID even when buried after 2KB+ of headers")
+	}
+
 	require.GreaterOrEqual(t, len(trace.Spans), 3,
 		"Should have spans from all services in the chain (a, b, c)")
 }

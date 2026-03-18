@@ -51,6 +51,8 @@ static __always_inline call_protocol_args_t *make_protocol_args(const pid_connec
     args->direction = direction;
     args->orig_dport = orig_dport;
     args->u_buf = (u64)u_buf;
+    args->orig_buf = 0;
+    args->full_bytes_len = 0;
     args->protocol_type = protocol_type_for_conn_info(info);
 
     return args;
@@ -69,6 +71,28 @@ static __always_inline void handle_buf_with_connection(void *ctx,
         return;
     }
 
+    __builtin_memcpy(&args->pid_conn, pid_conn, sizeof(pid_connection_info_t));
+    bpf_probe_read(args->small_buf, MIN_HTTP2_SIZE, (void *)args->u_buf);
+    bpf_tail_call(ctx, &jump_table, k_tail_handle_buf_with_args);
+}
+
+static __always_inline void handle_buf_with_connection_ext(void *ctx,
+                                                           pid_connection_info_t *pid_conn,
+                                                           void *u_buf,
+                                                           int bytes_len,
+                                                           u8 ssl,
+                                                           u8 direction,
+                                                           u16 orig_dport,
+                                                           u64 orig_buf,
+                                                           u32 full_bytes_len) {
+    call_protocol_args_t *args =
+        make_protocol_args(pid_conn, u_buf, bytes_len, ssl, direction, orig_dport);
+    if (!args) {
+        return;
+    }
+
+    args->orig_buf = orig_buf;
+    args->full_bytes_len = full_bytes_len;
     __builtin_memcpy(&args->pid_conn, pid_conn, sizeof(pid_connection_info_t));
     bpf_probe_read(args->small_buf, MIN_HTTP2_SIZE, (void *)args->u_buf);
     bpf_tail_call(ctx, &jump_table, k_tail_handle_buf_with_args);

@@ -38,12 +38,16 @@ typedef struct call_protocol_args {
     u8 direction;
     u8 packet_type;
     unsigned char small_buf[MIN_HTTP2_SIZE];
-    u8 pad[4];
+    u32 niter;
     int bytes_len;
     u16 orig_dport;
-    u16 _pad2;
+    u8 is_append;
+    u8 _pad[1];
     u64 u_buf;
     u64 self_ref_parent_id;
+    u64 orig_buf;       // original userspace buffer pointer for direct reads
+    u32 full_bytes_len; // full length from kernel (not capped by iovec buffer)
+    u32 _pad2;
 } call_protocol_args_t;
 
 // Here we keep information on the packets passing through the socket filter
