@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"go.opentelemetry.io/obi/pkg/appolly/app"
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
 	ebpfhttp "go.opentelemetry.io/obi/pkg/ebpf/common/http"
@@ -201,14 +203,14 @@ func HTTPInfoEventToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo) (reques
 		isClient                      = isClientEvent(event.Type)
 	)
 
-	slog.Debug("Event", "traceID", event.Tp.TraceId, "conn", event.ConnInfo, "buf", event.Buf[:])
+	slog.Debug("Event", "traceID", trace.TraceID(event.Tp.TraceId).String(), "conn", event.ConnInfo, "buf", event.Buf[:])
 
 	if event.HasLargeBuffers == 1 {
 		b, ok := extractTCPLargeBuffer(parseCtx, event.Tp.TraceId, packetTypeRequest, directionByPacketType(packetTypeRequest, isClient), event.ConnInfo)
 		if ok {
 			requestBuffer = b
 		} else {
-			slog.Debug("missing large buffer for HTTP request", "traceID", event.Tp.TraceId, "conn", event.ConnInfo, "packetType", packetTypeRequest)
+			slog.Debug("missing large buffer for HTTP request", "traceID", trace.TraceID(event.Tp.TraceId).String(), "conn", event.ConnInfo, "packetType", packetTypeRequest)
 			requestBuffer = largebuf.NewLargeBufferFrom(event.Buf[:])
 		}
 
@@ -217,7 +219,7 @@ func HTTPInfoEventToSpan(parseCtx *EBPFParseContext, event *BPFHTTPInfo) (reques
 			responseBuffer = b
 			hasResponse = true
 		} else {
-			slog.Debug("missing large buffer for HTTP response", "traceID", event.Tp.TraceId, "conn", event.ConnInfo, "packetType", packetTypeResponse)
+			slog.Debug("missing large buffer for HTTP response", "traceID", trace.TraceID(event.Tp.TraceId).String(), "conn", event.ConnInfo, "packetType", packetTypeResponse)
 		}
 	} else {
 		requestBuffer = largebuf.NewLargeBufferFrom(event.Buf[:])
