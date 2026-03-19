@@ -50,7 +50,7 @@ func TestReadTCPRequestIntoSpan_SQLServerTrafficIsServerSpan(t *testing.T) {
 	r.IsServer = true
 	r.ProtocolType = ProtocolTypeMySQL
 
-	cfg := config.EBPFTracer{HeuristicSQLDetect: true}
+	cfg := config.EBPFTracer{MaxRequestTPParseSizeKB: 4, HeuristicSQLDetect: true}
 	ctx := NewEBPFParseContext(&cfg, nil, nil)
 
 	binaryRecord := bytes.Buffer{}
@@ -74,7 +74,7 @@ func TestTCPReqParsing(t *testing.T) {
 	assert.NotNil(t, r)
 
 	// Verify fallback debug logs appear when no protocol matches
-	cfg := config.EBPFTracer{HeuristicSQLDetect: false, ProtocolDebug: true}
+	cfg := config.EBPFTracer{MaxRequestTPParseSizeKB: 4, HeuristicSQLDetect: false, ProtocolDebug: true}
 	ctx := NewEBPFParseContext(&cfg, nil, nil)
 
 	pipeR, pipeW, _ := os.Pipe()
@@ -171,7 +171,7 @@ func TestReadTCPRequestIntoSpan_Overflow(t *testing.T) {
 		},
 	}
 
-	cfg := config.EBPFTracer{HeuristicSQLDetect: true}
+	cfg := config.EBPFTracer{MaxRequestTPParseSizeKB: 4, HeuristicSQLDetect: true}
 	ctx := NewEBPFParseContext(&cfg, nil, nil)
 	binaryRecord := bytes.Buffer{}
 	require.NoError(t, binary.Write(&binaryRecord, binary.LittleEndian, tri))
@@ -275,7 +275,7 @@ func TestTCPReqMQTTHeuristicFailure(t *testing.T) {
 
 	// Now test via ReadTCPRequestIntoSpan - should be ignored
 	r := makeTCPReq(string(b), 1883)
-	cfg := config.EBPFTracer{HeuristicSQLDetect: false}
+	cfg := config.EBPFTracer{MaxRequestTPParseSizeKB: 4, HeuristicSQLDetect: false}
 	ctx := NewEBPFParseContext(&cfg, nil, nil)
 
 	binaryRecord := bytes.Buffer{}
@@ -346,7 +346,7 @@ func TestReadTCPRequestIntoSpan_CouchbaseKeyNotFound(t *testing.T) {
 	tri.Pid.UserPid = 1234
 	tri.Pid.Ns = 4026531840
 
-	cfg := config.EBPFTracer{HeuristicSQLDetect: false}
+	cfg := config.EBPFTracer{MaxRequestTPParseSizeKB: 4, HeuristicSQLDetect: false}
 	ctx := NewEBPFParseContext(&cfg, nil, nil)
 
 	binaryRecord := bytes.Buffer{}
@@ -408,7 +408,7 @@ func TestReadTCPRequestIntoSpan_CouchbaseFlexibleFraming(t *testing.T) {
 	tri.Pid.UserPid = 1234
 	tri.Pid.Ns = 4026531840
 
-	cfg := config.EBPFTracer{HeuristicSQLDetect: false}
+	cfg := config.EBPFTracer{MaxRequestTPParseSizeKB: 4, HeuristicSQLDetect: false}
 	ctx := NewEBPFParseContext(&cfg, nil, nil)
 
 	binaryRecord := bytes.Buffer{}

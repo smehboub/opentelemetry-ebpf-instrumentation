@@ -208,11 +208,7 @@ func (p *Tracer) constants() map[string]any {
 	m["g_bpf_debug"] = p.cfg.EBPF.BpfDebug
 	m["g_bpf_traceparent_enabled"] = p.cfg.EBPF.TrackRequestHeaders || p.cfg.EBPF.ContextPropagation.IsEnabled()
 
-	maxTpParseSize := uint32(p.cfg.EBPF.MaxRequestTPParseSizeKB)
-	if maxTpParseSize == 0 {
-		maxTpParseSize = 4 // Default to 4KB if not specified or 0
-	}
-	m["bpf_max_request_tp_parse_size_kb"] = maxTpParseSize
+	m["bpf_max_request_tp_parse_size_kb"] = uint32(p.cfg.EBPF.MaxRequestTPParseSizeKB)
 
 	return m
 }

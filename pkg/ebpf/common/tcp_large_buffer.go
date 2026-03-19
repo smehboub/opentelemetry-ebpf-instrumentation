@@ -82,7 +82,12 @@ func extractTCPLargeBuffer(
 		connInfo:   connInfo,
 	}
 
+	if parseCtx == nil || parseCtx.largeBuffers == nil {
+		return nil, false
+	}
+
 	lb, ok := parseCtx.largeBuffers.Get(key)
+
 	if !ok {
 		if parseCtx.protocolDebug {
 			fmt.Printf("<<< LargeBufferExtract: not found! (packet=%d direction=%d)\n", key.packetType, key.direction)

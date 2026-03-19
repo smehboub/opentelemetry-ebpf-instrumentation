@@ -35,7 +35,7 @@ func TestForwardRingbuf_CapacityFull(t *testing.T) {
 	forwardedMessages := forwardedMessagesQueue.Subscribe()
 	fltr := TestPidsFilter{services: map[app.PID]svc.Attrs{}}
 	fltr.AllowPID(1, 1, &svc.Attrs{UID: svc.UID{Name: "myService"}}, PIDTypeGo)
-	cfg := &config.EBPFTracer{BatchLength: 10}
+	cfg := &config.EBPFTracer{MaxRequestTPParseSizeKB: 4, BatchLength: 10}
 	go ForwardRingbuf(
 		cfg,
 		nil, // the source ring buffer can be null
@@ -93,7 +93,7 @@ func TestForwardRingbuf_Deadline(t *testing.T) {
 	forwardedMessages := forwardedMessagesQueue.Subscribe()
 	fltr := TestPidsFilter{services: map[app.PID]svc.Attrs{}}
 	fltr.AllowPID(1, 1, &svc.Attrs{UID: svc.UID{Name: "myService"}}, PIDTypeGo)
-	cfg := &config.EBPFTracer{BatchLength: 10, BatchTimeout: 20 * time.Millisecond}
+	cfg := &config.EBPFTracer{MaxRequestTPParseSizeKB: 4, BatchLength: 10, BatchTimeout: 20 * time.Millisecond}
 	go ForwardRingbuf(
 		cfg,
 		nil, // the source ring buffer can be null
@@ -139,7 +139,7 @@ func TestForwardRingbuf_Close(t *testing.T) {
 
 	metrics := &metricsReporter{}
 	closable := closableObject{}
-	cfg := &config.EBPFTracer{BatchLength: 10}
+	cfg := &config.EBPFTracer{MaxRequestTPParseSizeKB: 4, BatchLength: 10}
 	go ForwardRingbuf(
 		cfg,
 		nil, // the source ring buffer can be null

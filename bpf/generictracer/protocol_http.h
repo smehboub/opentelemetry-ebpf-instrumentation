@@ -32,6 +32,10 @@
 
 volatile const u32 high_request_volume;
 
+// Cap the number of recursive tail-calls used by the chunked traceparent parser.
+// This helps ensure we stay below the BPF_MAX_TAIL_CALL_CNT limit.
+#define TP_PARSE_MAX_NITER 32
+
 // empty_http_info zeroes and return the unique percpu copy in the map
 // this function assumes that a given thread is not trying to use many
 // instances at the same time
@@ -52,15 +56,8 @@ static __always_inline u32 trace_type_from_meta(http_connection_metadata_t *meta
     return TRACE_TYPE_SERVER;
 }
 
-static __always_inline u8
-http_get_or_create_trace_info(http_connection_metadata_t *meta,
-                              u32 pid,
-                              connection_info_t *conn,
-                              void *u_buf,
-                              int bytes_len,
-                              u8 ssl,
-                              u16 orig_dport,
-                              unsigned char *(*tp_loop_fn)(unsigned char *, const u16)) {
+static __always_inline u8 http_get_or_create_trace_info(
+    http_connection_metadata_t *meta, u32 pid, connection_info_t *conn, u8 ssl, u16 orig_dport) {
     //TODO use make_key
     egress_key_t e_key = {
         .d_port = conn->d_port,
@@ -548,7 +545,7 @@ int obi_continue2_protocol_http(struct pt_regs *ctx) {
 
 // k_tail_continue2_protocol_http_append
 SEC("kprobe/http")
-int obi_continue2_protocol_http_append(struct pt_regs *ctx) {
+int obi_continue2_protocol_http_append(struct pt_regs *ctx __attribute__((unused))) {
     call_protocol_args_t *args = protocol_args();
     if (!args) {
         return 0;
@@ -610,8 +607,11 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
         return 0;
     }
 
-    const u32 max_iter = bpf_max_request_tp_parse_size_kb;
-    if (args->niter >= max_iter || args->niter >= 64) {
+    const u32 chunk_size = 896;
+    const u32 max_bytes = (u32)bpf_max_request_tp_parse_size_kb * 1024;
+    u32 offset = args->niter * chunk_size;
+
+    if (args->niter >= TP_PARSE_MAX_NITER || offset >= max_bytes) {
         if (args->is_append) {
             bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
         } else {
@@ -619,8 +619,6 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
         }
         return 0;
     }
-
-    u32 offset = args->niter * 896; // 128 bytes overlap between chunks
 
     // Use full_bytes_len when we have orig_buf (direct userspace reads beyond iovec buffer)
     u32 effective_len = (u32)args->bytes_len;
@@ -674,11 +672,8 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
         make_tp_string(tp_buf, &tp_p->tp);
         bpf_dbg_printk("new tp via chunk: %s", tp_buf);
 
-        if (args->is_append) {
-            __builtin_memcpy(&info->tp, &tp_p->tp, sizeof(tp_info_t));
-            server_or_client_trace(
-                meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
-        }
+        __builtin_memcpy(&info->tp, &tp_p->tp, sizeof(tp_info_t));
+        server_or_client_trace(meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
 
         if (args->is_append) {
             bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
@@ -688,16 +683,17 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
         return 0;
     }
 
-    u32 next_offset = (args->niter + 1) * 896;
-    if (next_offset < effective_len && args->niter + 1 < max_iter && args->niter + 1 < 64) {
+    u32 next_offset = (args->niter + 1) * chunk_size;
+    if (next_offset < effective_len && next_offset < max_bytes &&
+        args->niter + 1 < TP_PARSE_MAX_NITER) {
         args->niter++;
         bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
+    }
+
+    if (args->is_append) {
+        bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
     } else {
-        if (args->is_append) {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
-        } else {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
-        }
+        bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
     }
 
     return 0;
@@ -711,16 +707,10 @@ __obi_continue_protocol_http(struct pt_regs *ctx,
     http_connection_metadata_t *meta =
         connection_meta_by_direction(args->direction, PACKET_TYPE_REQUEST);
 
-    u8 need_tp_parsing = http_get_or_create_trace_info(meta,
-                                                       args->pid_conn.pid,
-                                                       &args->pid_conn.conn,
-                                                       (void *)args->u_buf,
-                                                       args->bytes_len,
-                                                       args->ssl,
-                                                       args->orig_dport,
-                                                       tp_loop_fn);
+    u8 need_tp_parsing = http_get_or_create_trace_info(
+        meta, args->pid_conn.pid, &args->pid_conn.conn, args->ssl, args->orig_dport);
 
-    if (need_tp_parsing && tp_loop_fn == bpf_strstr_tp_loop) {
+    if (need_tp_parsing) {
         args->is_append = 0;
         args->niter = 0;
         bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);

@@ -194,6 +194,7 @@ func testWithHugeHeadersTraceparent(t *testing.T) {
 	require.EventuallyWithT(t, func(ct *assert.CollectT) {
 		resp, err := http.Get(jaegerQueryURL + "?service=tpclient-a&traceID=" + staticTraceID)
 		require.NoError(ct, err)
+		defer resp.Body.Close()
 		require.Equal(ct, http.StatusOK, resp.StatusCode)
 
 		var tq jaeger.TracesQuery
@@ -203,14 +204,14 @@ func testWithHugeHeadersTraceparent(t *testing.T) {
 		require.GreaterOrEqual(ct, len(traces), 1, "should find trace with huge headers + traceparent")
 		trace = traces[0]
 		require.NotEmpty(ct, trace.Spans)
+
+		// All spans must have the static trace ID, proving chunked extraction worked
+		for _, span := range trace.Spans {
+			require.Equal(ct, staticTraceID, span.TraceID,
+				"eBPF chunked parser should extract the static trace ID even when buried after 2KB+ of headers")
+		}
+
+		require.GreaterOrEqual(ct, len(trace.Spans), 3,
+			"Should have spans from all services in the chain (a, b, c)")
 	}, testTimeout, 100*time.Millisecond)
-
-	// CRITICAL: All spans must have the static trace ID, proving chunked extraction worked
-	for _, span := range trace.Spans {
-		require.Equal(t, staticTraceID, span.TraceID,
-			"eBPF chunked parser should extract the static trace ID even when buried after 2KB+ of headers")
-	}
-
-	require.GreaterOrEqual(t, len(trace.Spans), 3,
-		"Should have spans from all services in the chain (a, b, c)")
 }

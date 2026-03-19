@@ -582,7 +582,7 @@ time=\S+ level=DEBUG msg=debug arg=debug$`),
 		debugMode: true,
 		expectedCfg: Config{
 			TracePrinter: debug.TracePrinterText,
-			EBPF:         config.EBPFTracer{BpfDebug: true, ProtocolDebug: true},
+			EBPF:         config.EBPFTracer{ BpfDebug: true, ProtocolDebug: true},
 		},
 	}, {
 		name: "debug log with network flows",
@@ -596,7 +596,7 @@ time=\S+ level=DEBUG msg=debug arg=debug$`),
 		debugMode: true,
 		expectedCfg: Config{
 			TracePrinter: debug.TracePrinterText,
-			EBPF:         config.EBPFTracer{BpfDebug: true, ProtocolDebug: true},
+			EBPF:         config.EBPFTracer{ BpfDebug: true, ProtocolDebug: true},
 			NetworkFlows: NetworkConfig{Enable: true, Print: true},
 		},
 	}} {
