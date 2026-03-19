@@ -1243,7 +1243,7 @@ int obi_handle_buf_with_args(void *ctx) {
                                        k_large_buf_action_append);
 
                 if (reading) {
-                    if (g_bpf_traceparent_enabled &&
+                    if (g_bpf_traceparent_enabled && capture_header_buffer &&
                         info->len < bpf_max_request_tp_parse_size_kb * 1024) {
                         args->is_append = 1;
                         args->niter = 0;

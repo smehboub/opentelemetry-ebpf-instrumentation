@@ -160,7 +160,9 @@ static __always_inline u8 http_get_or_create_trace_info(
         if (meta) {
             const u32 type = trace_type_from_meta(meta);
             set_trace_info_for_connection(conn, type, tp_p);
-            server_or_client_trace(meta->type, conn, tp_p, ssl, orig_dport);
+            // Defer server_or_client_trace() until after chunked traceparent parsing completes.
+            // Calling it here and again after parsing would trigger conflict detection in
+            // server_or_client_trace(), invalidating the span without saving the parsed TP.
         }
 
         return 1;
@@ -589,22 +591,12 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
     const u32 type = trace_type_from_meta(meta);
     tp_info_pid_t *tp_p = trace_info_for_connection(&args->pid_conn.conn, type);
     if (!tp_p) {
-        if (args->is_append) {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
-        } else {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
-        }
-        return 0;
+        goto done;
     }
 
     unsigned char *buf = (unsigned char *)tp_char_buf_mem();
     if (!buf) {
-        if (args->is_append) {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
-        } else {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
-        }
-        return 0;
+        goto done_with_trace;
     }
 
     const u32 chunk_size = 896;
@@ -612,12 +604,7 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
     u32 offset = args->niter * chunk_size;
 
     if (args->niter >= TP_PARSE_MAX_NITER || offset >= max_bytes) {
-        if (args->is_append) {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
-        } else {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
-        }
-        return 0;
+        goto done_with_trace;
     }
 
     // Use full_bytes_len when we have orig_buf (direct userspace reads beyond iovec buffer)
@@ -629,12 +616,7 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
     }
 
     if (offset >= effective_len) {
-        if (args->is_append) {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
-        } else {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
-        }
-        return 0;
+        goto done_with_trace;
     }
 
     u32 to_read = effective_len - offset;
@@ -648,7 +630,11 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
     __bpf_memzero(buf, 512);
     __bpf_memzero(buf + 512, 512);
 
-    bpf_probe_read(buf, buf_len, (void *)(read_base + offset));
+    if (args->orig_buf && read_base == args->orig_buf) {
+        bpf_probe_read_user(buf, buf_len, (void *)(read_base + offset));
+    } else {
+        bpf_probe_read(buf, buf_len, (void *)(read_base + offset));
+    }
     bpf_dbg_printk("tp chunk scanning offset=%u to_read=%u niter=%u bytes_len=%u",
                    offset,
                    buf_len,
@@ -673,14 +659,11 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
         bpf_dbg_printk("new tp via chunk: %s", tp_buf);
 
         __builtin_memcpy(&info->tp, &tp_p->tp, sizeof(tp_info_t));
-        server_or_client_trace(meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
-
-        if (args->is_append) {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
-        } else {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
+        if (!args->is_append) {
+            server_or_client_trace(
+                meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
         }
-        return 0;
+        goto done;
     }
 
     u32 next_offset = (args->niter + 1) * chunk_size;
@@ -689,11 +672,19 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
         args->niter++;
         bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
     }
+    // Fall through: no more chunks to scan or tail-call failed
 
+done_with_trace:
+    if (!args->is_append) {
+        server_or_client_trace(meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
+    }
+done:
+    // Inline the continuation instead of tail-calling, so it executes even when
+    // the tail-call budget is exhausted after the maximum number of iterations.
     if (args->is_append) {
-        bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
+        info->len += args->bytes_len;
     } else {
-        bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
+        return __obi_continue2_protocol_http(ctx, args, info, meta);
     }
 
     return 0;
@@ -808,7 +799,8 @@ __obi_protocol_http(struct pt_regs *ctx, unsigned char *(*tp_loop_fn)(unsigned c
                                args->direction,
                                k_large_buf_action_append);
 
-        if (g_bpf_traceparent_enabled && info->len < bpf_max_request_tp_parse_size_kb * 1024) {
+        if (g_bpf_traceparent_enabled && capture_header_buffer &&
+            info->len < bpf_max_request_tp_parse_size_kb * 1024) {
             args->is_append = 1;
             args->niter = 0;
             bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
