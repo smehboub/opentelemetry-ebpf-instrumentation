@@ -13,7 +13,6 @@ import (
 )
 
 type largeBufferKey struct {
-	traceID               [16]uint8
 	packetType, direction uint8
 	connInfo              BpfConnectionInfoT
 }
@@ -24,6 +23,10 @@ const (
 )
 
 func appendTCPLargeBuffer(parseCtx *EBPFParseContext, record *ringbuf.Record) (request.Span, bool, error) {
+	if parseCtx == nil || parseCtx.largeBuffers == nil {
+		return request.Span{}, true, nil
+	}
+
 	hdrSize := uint32(unsafe.Sizeof(TCPLargeBufferHeader{})) - uint32(unsafe.Sizeof(uintptr(0))) // Remove `buf` placeholder
 
 	event, err := ReinterpretCast[TCPLargeBufferHeader](record.RawSample)
@@ -32,7 +35,6 @@ func appendTCPLargeBuffer(parseCtx *EBPFParseContext, record *ringbuf.Record) (r
 	}
 
 	key := largeBufferKey{
-		traceID:    event.Tp.TraceId,
 		packetType: event.PacketType,
 		direction:  event.Direction,
 		connInfo:   event.ConnInfo,
@@ -71,12 +73,10 @@ func appendTCPLargeBuffer(parseCtx *EBPFParseContext, record *ringbuf.Record) (r
 
 func extractTCPLargeBuffer(
 	parseCtx *EBPFParseContext,
-	traceID [16]uint8,
 	packetType, direction uint8,
 	connInfo BpfConnectionInfoT,
 ) (*largebuf.LargeBuffer, bool) {
 	key := largeBufferKey{
-		traceID:    traceID,
 		packetType: packetType,
 		direction:  direction,
 		connInfo:   connInfo,
