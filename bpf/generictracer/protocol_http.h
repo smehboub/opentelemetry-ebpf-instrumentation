@@ -649,9 +649,11 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
             decode_hex(tp_p->tp.parent_id, s_id, SPAN_ID_CHAR_LEN);
         }
 
-        unsigned char tp_buf[TP_MAX_VAL_LENGTH];
-        make_tp_string(tp_buf, &tp_p->tp);
-        bpf_dbg_printk("new tp via chunk: %s", tp_buf);
+        if (g_bpf_debug) {
+            unsigned char tp_buf[TP_MAX_VAL_LENGTH];
+            make_tp_string(tp_buf, &tp_p->tp);
+            bpf_dbg_printk("new tp via chunk: %s", tp_buf);
+        }
 
         __builtin_memcpy(&info->tp, &tp_p->tp, sizeof(tp_info_t));
         if (!args->is_append) {
@@ -707,6 +709,36 @@ __obi_continue_protocol_http(struct pt_regs *ctx,
             const u32 type = trace_type_from_meta(meta);
             tp_info_pid_t *tp_p = trace_info_for_connection(&args->pid_conn.conn, type);
             if (tp_p) {
+                // On legacy kernels (without bpf_loop), the chunked tail-call
+                // parser is unavailable. Restore best-effort single-buffer scan
+                // to extract traceparent from the first TRACE_BUF_SIZE bytes.
+                if (tp_loop_fn != bpf_strstr_tp_loop) {
+                    unsigned char *buf = (unsigned char *)tp_char_buf_mem();
+                    if (buf) {
+                        const u32 clamped = (u32)args->bytes_len < TRACE_BUF_SIZE
+                                                ? (u32)args->bytes_len
+                                                : TRACE_BUF_SIZE;
+                        const u16 buf_len = (u16)clamped;
+                        _Static_assert(TRACE_BUF_SIZE == 1024,
+                                       "Please fix the __bpf_memzero statements below this line");
+                        __bpf_memzero(buf, 512);
+                        __bpf_memzero(buf + 512, 512);
+                        bpf_probe_read(buf, buf_len, (void *)args->u_buf);
+
+                        unsigned char *res = tp_loop_fn(buf, buf_len);
+                        if (res) {
+                            bpf_dbg_printk("Found traceparent in headers [%s]", res);
+                            unsigned char *t_id = extract_trace_id(res);
+                            unsigned char *f_id = extract_flags(res);
+                            unsigned char *s_id = extract_span_id(res);
+                            decode_hex(tp_p->tp.trace_id, t_id, TRACE_ID_CHAR_LEN);
+                            decode_hex((unsigned char *)&tp_p->tp.flags, f_id, FLAGS_CHAR_LEN);
+                            if (meta->type != EVENT_HTTP_CLIENT) {
+                                decode_hex(tp_p->tp.parent_id, s_id, SPAN_ID_CHAR_LEN);
+                            }
+                        }
+                    }
+                }
                 server_or_client_trace(
                     meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
             }
