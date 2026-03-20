@@ -601,9 +601,12 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
 
     const u32 chunk_size = 896;
     const u32 max_bytes = (u32)bpf_max_request_tp_parse_size_kb * 1024;
+    // In append mode, the caller already updated info->len before the tail-call,
+    // so base_offset = cumulative bytes processed before this chunk.
+    const u32 base_offset = args->is_append ? (u32)(info->len - (u32)args->bytes_len) : 0;
     u32 offset = args->niter * chunk_size;
 
-    if (args->niter >= TP_PARSE_MAX_NITER || offset >= max_bytes) {
+    if (args->niter >= TP_PARSE_MAX_NITER || (base_offset + offset) >= max_bytes) {
         goto done_with_trace;
     }
 
@@ -622,6 +625,15 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
     u32 to_read = effective_len - offset;
     if (to_read > TRACE_BUF_SIZE) {
         to_read = TRACE_BUF_SIZE;
+    }
+    // Clamp to_read so the read window does not extend past max_bytes.
+    const u32 remaining_budget =
+        max_bytes > (base_offset + offset) ? max_bytes - (base_offset + offset) : 0;
+    if (to_read > remaining_budget) {
+        to_read = remaining_budget;
+    }
+    if (to_read == 0) {
+        goto done_with_trace;
     }
     const u16 buf_len = to_read;
 
@@ -667,7 +679,7 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
     }
 
     u32 next_offset = (args->niter + 1) * chunk_size;
-    if (next_offset < effective_len && next_offset < max_bytes &&
+    if (next_offset < effective_len && (base_offset + next_offset) < max_bytes &&
         args->niter + 1 < TP_PARSE_MAX_NITER) {
         args->niter++;
         bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
@@ -681,9 +693,8 @@ done_with_trace:
 done:
     // Inline the continuation instead of tail-calling, so it executes even when
     // the tail-call budget is exhausted after the maximum number of iterations.
-    if (args->is_append) {
-        info->len += args->bytes_len;
-    } else {
+    // In append mode, the caller already updated info->len before the tail-call.
+    if (!args->is_append) {
         return __obi_continue2_protocol_http(ctx, args, info, meta);
     }
 
