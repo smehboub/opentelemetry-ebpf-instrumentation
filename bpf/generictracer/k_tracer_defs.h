@@ -53,6 +53,8 @@ static __always_inline call_protocol_args_t *make_protocol_args(const pid_connec
     args->u_buf = (u64)u_buf;
     args->orig_buf = 0;
     args->full_bytes_len = 0;
+    args->niter = 0;
+    args->is_append = 0;
     args->protocol_type = protocol_type_for_conn_info(info);
 
     return args;

@@ -1246,13 +1246,14 @@ int obi_handle_buf_with_args(void *ctx) {
                                        k_large_buf_action_append);
 
                 if (reading) {
+                    const u32 prev_len = info->len;
+                    info->len += args->bytes_len;
                     if (g_bpf_traceparent_enabled && capture_header_buffer &&
-                        info->len < bpf_max_request_tp_parse_size_kb * 1024) {
+                        prev_len < bpf_max_request_tp_parse_size_kb * 1024) {
                         args->is_append = 1;
                         args->niter = 0;
                         bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
                     }
-                    info->len += args->bytes_len;
                 } else if (responding) {
                     info->end_monotime_ns = bpf_ktime_get_ns();
                     bpf_d_printk("bytes len %d, new bytes %d", info->resp_len, args->bytes_len);
