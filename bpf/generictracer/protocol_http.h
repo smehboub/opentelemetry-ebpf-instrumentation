@@ -545,23 +545,6 @@ int obi_continue2_protocol_http(struct pt_regs *ctx) {
     return __obi_continue2_protocol_http(ctx, args, info, meta);
 }
 
-// k_tail_continue2_protocol_http_append
-SEC("kprobe/http")
-int obi_continue2_protocol_http_append(struct pt_regs *ctx __attribute__((unused))) {
-    call_protocol_args_t *args = protocol_args();
-    if (!args) {
-        return 0;
-    }
-
-    http_info_t *info = bpf_map_lookup_elem(&ongoing_http, &args->pid_conn);
-    if (!info) {
-        return 0;
-    }
-
-    info->len += args->bytes_len;
-    return 0;
-}
-
 volatile const u32 bpf_max_request_tp_parse_size_kb;
 
 // k_tail_parse_traceparent_http
@@ -580,9 +563,9 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
     http_connection_metadata_t *meta =
         connection_meta_by_direction(args->direction, PACKET_TYPE_REQUEST);
     if (!meta) {
-        if (args->is_append) {
-            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http_append);
-        } else {
+        // In append mode, info->len was already updated by the caller before
+        // tail-calling here, so just return without double-counting.
+        if (!args->is_append) {
             bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
         }
         return 0;
