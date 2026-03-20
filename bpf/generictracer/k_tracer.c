@@ -895,7 +895,10 @@ static __always_inline int return_recvmsg(void *ctx, struct sock *in_sock, u64 i
             goto done;
         }
 
-        orig_ubuf = (u64)iov_ctx->ubuf;
+        if (bpf_core_enum_value_exists(enum iter_type___dummy, ITER_UBUF) &&
+            iov_ctx->iter_type == bpf_core_enum_value(enum iter_type___dummy, ITER_UBUF)) {
+            orig_ubuf = (u64)iov_ctx->ubuf;
+        }
 
         buf = iovec_memory();
         if (buf) {

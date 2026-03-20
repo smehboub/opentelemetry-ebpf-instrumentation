@@ -419,9 +419,8 @@ func FixupSpec(spec *ebpf.CollectionSpec, overrideKernelVersion bool) {
 		spec.Programs["obi_protocol_http"] = spec.Programs["obi_protocol_http_legacy"]
 		spec.Programs["obi_protocol_http"].Name = "obi_protocol_http"
 	}
-	// Hack: insert a dummy unused program in order to be able to use bpf2go generated struct to load
-	// the collection.
-	spec.Programs["obi_protocol_http_legacy"] = &ebpf.ProgramSpec{
+
+	dummy := &ebpf.ProgramSpec{
 		Name: "obi_dummy",
 		Type: ebpf.Kprobe,
 		Instructions: asm.Instructions{
@@ -429,6 +428,18 @@ func FixupSpec(spec *ebpf.CollectionSpec, overrideKernelVersion bool) {
 			asm.Return(),
 		},
 		License: "MIT",
+	}
+
+	// Hack: insert a dummy unused program in order to be able to use bpf2go generated struct to load
+	// the collection.
+	spec.Programs["obi_protocol_http_legacy"] = dummy
+
+	if !SupportsEBPFLoops(ptlog(), overrideKernelVersion) {
+		// The chunked traceparent parser uses bpf_loop which is unavailable on
+		// legacy kernels. Replace with a dummy to prevent verifier rejection.
+		// The BPF C fallback in __obi_continue_protocol_http handles deferred
+		// server_or_client_trace and continuation when this program is not called.
+		spec.Programs["obi_parse_traceparent_http"] = dummy
 	}
 }
 

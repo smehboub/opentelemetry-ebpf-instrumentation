@@ -291,7 +291,7 @@ static __always_inline http_info_t *get_or_set_http_info(http_info_t *info,
             const u8 req_type = request_type_by_direction(direction, packet_type);
             if (!http_info_complete(old_info)) {
                 if (old_info->type == req_type && is_duplicate_info(old_info)) {
-                    return old_info;
+                    return NULL;
                 }
             }
             // this will delete ongoing_http for this connection info if there's full stale request
@@ -702,15 +702,28 @@ __obi_continue_protocol_http(struct pt_regs *ctx,
         meta, args->pid_conn.pid, &args->pid_conn.conn, args->ssl, args->orig_dport);
 
     if (need_tp_parsing) {
-        args->is_append = 0;
-        args->niter = 0;
-        bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
-    } else if (tp_loop_fn == bpf_strstr_tp_loop) {
-        return __obi_continue2_protocol_http(ctx, args, info, meta);
-    } else {
-        bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
+        if (tp_loop_fn == bpf_strstr_tp_loop) {
+            args->is_append = 0;
+            args->niter = 0;
+            bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
+        }
+        // Legacy path or tail-call failed: the deferred server_or_client_trace
+        // must be called now before continuing HTTP processing.
+        if (meta) {
+            const u32 type = trace_type_from_meta(meta);
+            tp_info_pid_t *tp_p = trace_info_for_connection(&args->pid_conn.conn, type);
+            if (tp_p) {
+                server_or_client_trace(
+                    meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
+            }
+        }
     }
 
+    if (tp_loop_fn == bpf_strstr_tp_loop) {
+        return __obi_continue2_protocol_http(ctx, args, info, meta);
+    }
+
+    bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
     return 0;
 }
 
