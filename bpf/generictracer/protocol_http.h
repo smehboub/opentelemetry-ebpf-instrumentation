@@ -603,7 +603,8 @@ int obi_parse_traceparent_http(struct pt_regs *ctx) {
         goto done_with_trace;
     }
 
-    const u32 chunk_size = 896;
+    // 1024 - 64 - 1
+    const u32 chunk_size = 959;
     const u32 max_bytes = (u32)bpf_max_request_tp_parse_size_kb * 1024;
     // In append mode, the caller already updated info->len before the tail-call,
     // so base_offset = cumulative bytes processed before this chunk.
