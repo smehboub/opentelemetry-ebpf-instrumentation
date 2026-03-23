@@ -478,6 +478,10 @@ static __always_inline int http_send_large_buffer(http_info_t *req,
     large_buf->conn_info = req->conn_info;
     large_buf->action = action;
     large_buf->tp = req->tp;
+    // Use the stable original trace ID for large buffers so userspace can correlate
+    // chunks even if the request's trace ID is later updated by a chunked traceparent.
+    __builtin_memcpy(
+        large_buf->tp.trace_id, req->original_trace_id, sizeof(large_buf->tp.trace_id));
 
     u32 max_available_bytes = http_max_captured_bytes - bytes_sent;
     bpf_clamp_umax(max_available_bytes, k_large_buf_max_http_captured_bytes);
@@ -511,6 +515,12 @@ static __always_inline int __obi_continue2_protocol_http(struct pt_regs *ctx,
         tp_info_pid_t *tp_p = trace_info_for_connection(&args->pid_conn.conn, type);
         if (tp_p) {
             info->tp = tp_p->tp;
+            if (info->start_monotime_ns == 0) {
+                // Initialize original_trace_id exactly once per request.
+                // It remains stable even if info->tp.trace_id gets overwritten.
+                __builtin_memcpy(
+                    info->original_trace_id, tp_p->tp.trace_id, sizeof(info->original_trace_id));
+            }
             if (args->self_ref_parent_id) {
                 bpf_dbg_printk("overwriting parent id from the self referencing client request");
                 __builtin_memcpy(&info->tp.parent_id, &args->self_ref_parent_id, sizeof(u64));
