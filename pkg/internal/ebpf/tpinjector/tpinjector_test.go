@@ -86,7 +86,8 @@ func TestTracer_Constants(t *testing.T) {
 					BPFPidFilterOff: tt.bpfPidFilterOff,
 				},
 				EBPF: config.EBPFTracer{
-					MaxTransactionTime: 10 * time.Second,
+					MaxRequestTPParseSizeKB: 4,
+					MaxTransactionTime:      10 * time.Second,
 				},
 			}
 			err := cfg.EBPF.ContextPropagation.UnmarshalText([]byte(tt.contextPropagation))

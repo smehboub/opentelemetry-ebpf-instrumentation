@@ -153,7 +153,7 @@ func TestCheckOSCapabilities(t *testing.T) {
 
 		cfg := Config{
 			NetworkFlows: NetworkConfig{Enable: data.class == capNet, Source: netSource},
-			EBPF:         config.EBPFTracer{ContextPropagation: contextProp},
+			EBPF:         config.EBPFTracer{MaxRequestTPParseSizeKB: 4, ContextPropagation: contextProp},
 		}
 		if data.class == capApp {
 			// activates app o11y feature

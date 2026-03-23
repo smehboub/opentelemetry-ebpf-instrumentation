@@ -962,6 +962,8 @@ static __always_inline int return_recvmsg(void *ctx, struct sock *in_sock, u64 i
     }
 
     unsigned char *buf = 0;
+    u64 orig_ubuf = 0;
+    int full_copied_len = copied_len;
     if (args) {
         iovec_iter_ctx *iov_ctx = (iovec_iter_ctx *)&args->iovec_ctx;
 
@@ -969,6 +971,11 @@ static __always_inline int return_recvmsg(void *ctx, struct sock *in_sock, u64 i
             bpf_dbg_printk("iovec_ptr found in kprobe is NULL, ignoring this tcp_recvmsg");
 
             goto done;
+        }
+
+        if (bpf_core_enum_value_exists(enum iter_type___dummy, ITER_UBUF) &&
+            iov_ctx->iter_type == bpf_core_enum_value(enum iter_type___dummy, ITER_UBUF)) {
+            orig_ubuf = (u64)iov_ctx->ubuf;
         }
 
         buf = iovec_memory();
@@ -1024,8 +1031,15 @@ static __always_inline int return_recvmsg(void *ctx, struct sock *in_sock, u64 i
             if (buf && copied_len) {
                 bpf_map_delete_elem(&active_recv_args, &id);
                 // doesn't return must be logically last statement
-                handle_buf_with_connection(
-                    ctx, &info, buf, copied_len, NO_SSL, TCP_RECV, orig_dport);
+                handle_buf_with_connection_ext(ctx,
+                                               &info,
+                                               buf,
+                                               copied_len,
+                                               NO_SSL,
+                                               TCP_RECV,
+                                               orig_dport,
+                                               orig_ubuf,
+                                               full_copied_len);
             }
         } else {
             bpf_dbg_printk("identified SSL connection, ignoring: [%llx]...", *ssl);
@@ -1461,7 +1475,14 @@ int obi_handle_buf_with_args(void *ctx) {
                                        k_large_buf_action_append);
 
                 if (reading) {
+                    const u32 prev_len = info->len;
                     info->len += args->bytes_len;
+                    if (g_bpf_traceparent_enabled && capture_header_buffer &&
+                        prev_len < bpf_max_request_tp_parse_size_kb * 1024) {
+                        args->is_append = 1;
+                        args->niter = 0;
+                        bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
+                    }
                 } else if (responding) {
                     info->end_monotime_ns = bpf_ktime_get_ns();
                     bpf_d_printk("bytes len %d, new bytes %d", info->resp_len, args->bytes_len);

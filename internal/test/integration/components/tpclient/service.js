@@ -100,6 +100,31 @@ app.get('/smoke', (req, res) => {
   res.sendStatus(200);
 });
 
+// Endpoint: Request WITH huge headers before traceparent (eBPF chunked parsing)
+app.get('/with-huge-tp', async (req, res) => {
+  if (upstream) {
+    try {
+      const downstreamURL = `${upstream}/with-huge-tp`;
+      const traceparent = req.headers.traceparent || STATIC_TRACEPARENT;
+      // Send a large filler header (~2500 bytes) to push traceparent beyond the 1KB window
+      const hugeValue = 'X'.repeat(2500);
+      console.log(`[${route}/with-huge-tp] Making client call to ${downstreamURL} WITH huge headers + traceparent`);
+      const response = await axios.get(downstreamURL, {
+        headers: {
+          'x-filler': hugeValue,
+          'traceparent': traceparent
+        }
+      });
+      res.send(`${route}/with-huge-tp → ${response.data}`);
+    } catch (err) {
+      console.error(`[${route}/with-huge-tp] Error:`, err.message);
+      res.status(500).send(`Error: ${err.message}`);
+    }
+  } else {
+    res.send(`End of chain (${route})`);
+  }
+});
+
 app.listen(port, () => {
   console.log(`Service ${route.toUpperCase()} running on port ${port}`);
   console.log(upstream ? `Upstream: ${upstream}` : `End of chain`);

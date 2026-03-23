@@ -35,6 +35,10 @@
 
 volatile const u32 high_request_volume;
 
+// Cap the number of recursive tail-calls used by the chunked traceparent parser.
+// This helps ensure we stay below the BPF_MAX_TAIL_CALL_CNT limit.
+#define TP_PARSE_MAX_NITER 32
+
 // empty_http_info zeroes and return the unique percpu copy in the map
 // this function assumes that a given thread is not trying to use many
 // instances at the same time
@@ -55,15 +59,8 @@ static __always_inline u32 trace_type_from_meta(http_connection_metadata_t *meta
     return TRACE_TYPE_SERVER;
 }
 
-static __always_inline void
-http_get_or_create_trace_info(http_connection_metadata_t *meta,
-                              u32 pid,
-                              connection_info_t *conn,
-                              void *u_buf,
-                              int bytes_len,
-                              u8 ssl,
-                              u16 orig_dport,
-                              unsigned char *(*tp_loop_fn)(unsigned char *, const u16)) {
+static __always_inline u8 http_get_or_create_trace_info(
+    http_connection_metadata_t *meta, u32 pid, connection_info_t *conn, u8 ssl, u16 orig_dport) {
     //TODO use make_key
     egress_key_t e_key = {
         .d_port = conn->d_port,
@@ -83,13 +80,13 @@ http_get_or_create_trace_info(http_connection_metadata_t *meta,
 
         // clean up so that TC does not pick it up
         bpf_map_delete_elem(&outgoing_trace_map, &e_key);
-        return;
+        return 0;
     }
 
     tp_p = (tp_info_pid_t *)tp_info_mem();
 
     if (!tp_p) {
-        return;
+        return 0;
     }
 
     tp_p->tp.ts = bpf_ktime_get_ns();
@@ -145,7 +142,13 @@ http_get_or_create_trace_info(http_connection_metadata_t *meta,
         }
     }
 
+    bpf_dbg_printk("evaluating tp block: g_bpf_traceparent_enabled=%d skip_tp_parsing=%d",
+                   g_bpf_traceparent_enabled,
+                   skip_tp_parsing);
     if (g_bpf_traceparent_enabled && !skip_tp_parsing) {
+        bpf_dbg_printk("capture_header_buffer=%d tp_enabled=%d",
+                       capture_header_buffer,
+                       g_bpf_traceparent_enabled);
         // The below buffer scan can be expensive on high volume of requests. We make it optional
         // for customers to enable it. Off by default.
         if (!capture_header_buffer) {
@@ -154,43 +157,18 @@ http_get_or_create_trace_info(http_connection_metadata_t *meta,
                 set_trace_info_for_connection(conn, type, tp_p);
                 server_or_client_trace(meta->type, conn, tp_p, ssl, orig_dport);
             }
-            return;
+            return 0;
         }
 
-        unsigned char *buf = (unsigned char *)tp_char_buf_mem();
-        if (buf) {
-            const u16 buf_len = bytes_len & (TRACE_BUF_SIZE - 1);
-            _Static_assert(TRACE_BUF_SIZE == 1024,
-                           "Please fix the __bpf_memzero statements below this line");
-            __bpf_memzero(buf, 512);
-            __bpf_memzero(buf + 512, 512);
-
-            bpf_probe_read(buf, buf_len, u_buf);
-
-            unsigned char *res = tp_loop_fn(buf, buf_len);
-            if (res) {
-                bpf_dbg_printk("Found traceparent in headers [%s] overriding what was before", res);
-                unsigned char *t_id = extract_trace_id(res);
-                unsigned char *s_id = extract_span_id(res);
-                unsigned char *f_id = extract_flags(res);
-
-                decode_hex(tp_p->tp.trace_id, t_id, TRACE_ID_CHAR_LEN);
-                decode_hex((unsigned char *)&tp_p->tp.flags, f_id, FLAGS_CHAR_LEN);
-                if (meta && meta->type != EVENT_HTTP_CLIENT) {
-                    decode_hex(tp_p->tp.parent_id, s_id, SPAN_ID_CHAR_LEN);
-                }
-
-                if (g_bpf_debug) {
-                    unsigned char tp_buf[TP_MAX_VAL_LENGTH];
-                    make_tp_string(tp_buf, &tp_p->tp);
-                    bpf_dbg_printk("new tp: %s", tp_buf);
-                }
-            } else {
-                bpf_dbg_printk("No additional traceparent in headers, using what was made before");
-            }
-        } else {
-            return;
+        if (meta) {
+            const u32 type = trace_type_from_meta(meta);
+            set_trace_info_for_connection(conn, type, tp_p);
+            // Defer server_or_client_trace() until after chunked traceparent parsing completes.
+            // Calling it here and again after parsing would trigger conflict detection in
+            // server_or_client_trace(), invalidating the span without saving the parsed TP.
         }
+
+        return 1;
     }
 
     if (meta) {
@@ -203,6 +181,7 @@ http_get_or_create_trace_info(http_connection_metadata_t *meta,
         // sock msg information here and mark it so that we don't override the span_id.
         server_or_client_trace(meta->type, conn, tp_p, ssl, orig_dport);
     }
+    return 0;
 }
 
 static __always_inline u8 is_http(const unsigned char *p, u32 len, u8 *packet_type) {
@@ -315,7 +294,7 @@ static __always_inline http_info_t *get_or_set_http_info(http_info_t *info,
             const u8 req_type = request_type_by_direction(direction, packet_type);
             if (!http_info_complete(old_info)) {
                 if (old_info->type == req_type && is_duplicate_info(old_info)) {
-                    return 0;
+                    return NULL;
                 }
             }
             // this will delete ongoing_http for this connection info if there's full stale request
@@ -577,6 +556,154 @@ int obi_continue2_protocol_http(struct pt_regs *ctx) {
     return __obi_continue2_protocol_http(ctx, args, info, meta);
 }
 
+volatile const u32 bpf_max_request_tp_parse_size_kb;
+
+// k_tail_parse_traceparent_http
+SEC("kprobe/http")
+int obi_parse_traceparent_http(struct pt_regs *ctx) {
+    call_protocol_args_t *args = protocol_args();
+    if (!args) {
+        return 0;
+    }
+
+    http_info_t *info = bpf_map_lookup_elem(&ongoing_http, &args->pid_conn);
+    if (!info) {
+        return 0;
+    }
+
+    http_connection_metadata_t *meta =
+        connection_meta_by_direction(args->direction, PACKET_TYPE_REQUEST);
+    if (!meta) {
+        // In append mode, info->len was already updated by the caller before
+        // tail-calling here, so just return without double-counting.
+        if (!args->is_append) {
+            bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
+        }
+        return 0;
+    }
+
+    const u32 type = trace_type_from_meta(meta);
+    tp_info_pid_t *tp_p = trace_info_for_connection(&args->pid_conn.conn, type);
+    if (!tp_p) {
+        goto done;
+    }
+
+    unsigned char *buf = (unsigned char *)tp_char_buf_mem();
+    if (!buf) {
+        goto done_with_trace;
+    }
+
+    const u32 chunk_size = 896;
+    const u32 max_bytes = (u32)bpf_max_request_tp_parse_size_kb * 1024;
+    // In append mode, the caller already updated info->len before the tail-call,
+    // so base_offset = cumulative bytes processed before this chunk.
+    const u32 base_offset = args->is_append ? (u32)(info->len - (u32)args->bytes_len) : 0;
+    u32 offset = args->niter * chunk_size;
+
+    if (args->niter >= TP_PARSE_MAX_NITER || (base_offset + offset) >= max_bytes) {
+        goto done_with_trace;
+    }
+
+    // Use full_bytes_len when we have orig_buf (direct userspace reads beyond iovec buffer)
+    u32 effective_len = (u32)args->bytes_len;
+    u64 read_base = args->u_buf;
+    if (args->orig_buf && args->full_bytes_len > effective_len) {
+        effective_len = args->full_bytes_len;
+        read_base = args->orig_buf;
+    }
+
+    if (offset >= effective_len) {
+        goto done_with_trace;
+    }
+
+    u32 to_read = effective_len - offset;
+    if (to_read > TRACE_BUF_SIZE) {
+        to_read = TRACE_BUF_SIZE;
+    }
+    // Clamp to_read so the read window does not extend past max_bytes.
+    const u32 remaining_budget =
+        max_bytes > (base_offset + offset) ? max_bytes - (base_offset + offset) : 0;
+    if (to_read > remaining_budget) {
+        to_read = remaining_budget;
+    }
+    if (to_read == 0) {
+        goto done_with_trace;
+    }
+    const u16 buf_len = to_read;
+
+    _Static_assert(TRACE_BUF_SIZE == 1024,
+                   "Please fix the __bpf_memzero statements below this line");
+    __bpf_memzero(buf, 512);
+    __bpf_memzero(buf + 512, 512);
+
+    if (args->orig_buf && read_base == args->orig_buf) {
+        bpf_probe_read_user(buf, buf_len, (void *)(read_base + offset));
+    } else {
+        bpf_probe_read(buf, buf_len, (void *)(read_base + offset));
+    }
+    bpf_dbg_printk("tp chunk scanning offset=%u to_read=%u niter=%u bytes_len=%u",
+                   offset,
+                   buf_len,
+                   args->niter,
+                   effective_len);
+
+    unsigned char *res = bpf_strstr_tp_loop(buf, buf_len);
+    if (res) {
+        bpf_dbg_printk("Found chunked traceparent [%s] chunk %u", res, args->niter);
+        unsigned char *t_id = extract_trace_id(res);
+        unsigned char *f_id = extract_flags(res);
+        unsigned char *s_id = extract_span_id(res);
+
+        decode_hex(tp_p->tp.trace_id, t_id, TRACE_ID_CHAR_LEN);
+        decode_hex((unsigned char *)&tp_p->tp.flags, f_id, FLAGS_CHAR_LEN);
+        if (meta->type != EVENT_HTTP_CLIENT) {
+            decode_hex(tp_p->tp.parent_id, s_id, SPAN_ID_CHAR_LEN);
+        }
+
+        if (g_bpf_debug) {
+            unsigned char tp_buf[TP_MAX_VAL_LENGTH];
+            make_tp_string(tp_buf, &tp_p->tp);
+            bpf_dbg_printk("new tp via chunk: %s", tp_buf);
+        }
+
+        __builtin_memcpy(&info->tp, &tp_p->tp, sizeof(tp_info_t));
+        if (!args->is_append) {
+            server_or_client_trace(
+                meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
+        }
+        goto done;
+    }
+
+    u32 next_offset = (args->niter + 1) * chunk_size;
+    if (next_offset < effective_len && (base_offset + next_offset) < max_bytes &&
+        args->niter + 1 < TP_PARSE_MAX_NITER) {
+        args->niter++;
+        bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
+    }
+    // Fall through: no more chunks to scan or tail-call failed
+
+done_with_trace:
+    if (!args->is_append) {
+        server_or_client_trace(meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
+    }
+done:
+    // Inline the continuation instead of tail-calling, so it executes even when
+    // the tail-call budget is exhausted after the maximum number of iterations.
+    // In append mode, the caller already updated info->len before the tail-call.
+    if (!args->is_append) {
+        return __obi_continue2_protocol_http(ctx, args, info, meta);
+    }
+
+    // Append mode: emit large buffer now that the trace ID is finalized.
+    http_send_large_buffer(info,
+                           (void *)args->u_buf,
+                           args->bytes_len,
+                           args->packet_type,
+                           args->direction,
+                           k_large_buf_action_append);
+    return 0;
+}
+
 static __always_inline int
 __obi_continue_protocol_http(struct pt_regs *ctx,
                              call_protocol_args_t *args,
@@ -585,21 +712,62 @@ __obi_continue_protocol_http(struct pt_regs *ctx,
     http_connection_metadata_t *meta =
         connection_meta_by_direction(args->direction, PACKET_TYPE_REQUEST);
 
-    http_get_or_create_trace_info(meta,
-                                  args->pid_conn.pid,
-                                  &args->pid_conn.conn,
-                                  (void *)args->u_buf,
-                                  args->bytes_len,
-                                  args->ssl,
-                                  args->orig_dport,
-                                  tp_loop_fn);
+    u8 need_tp_parsing = http_get_or_create_trace_info(
+        meta, args->pid_conn.pid, &args->pid_conn.conn, args->ssl, args->orig_dport);
+
+    if (need_tp_parsing) {
+        if (tp_loop_fn == bpf_strstr_tp_loop) {
+            args->is_append = 0;
+            args->niter = 0;
+            bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
+        }
+        // Legacy path or tail-call failed: the deferred server_or_client_trace
+        // must be called now before continuing HTTP processing.
+        if (meta) {
+            const u32 type = trace_type_from_meta(meta);
+            tp_info_pid_t *tp_p = trace_info_for_connection(&args->pid_conn.conn, type);
+            if (tp_p) {
+                // On legacy kernels (without bpf_loop), the chunked tail-call
+                // parser is unavailable. Restore best-effort single-buffer scan
+                // to extract traceparent from the first TRACE_BUF_SIZE bytes.
+                if (tp_loop_fn != bpf_strstr_tp_loop) {
+                    unsigned char *buf = (unsigned char *)tp_char_buf_mem();
+                    if (buf) {
+                        const u32 clamped = (u32)args->bytes_len < TRACE_BUF_SIZE
+                                                ? (u32)args->bytes_len
+                                                : TRACE_BUF_SIZE;
+                        const u16 buf_len = (u16)clamped;
+                        _Static_assert(TRACE_BUF_SIZE == 1024,
+                                       "Please fix the __bpf_memzero statements below this line");
+                        __bpf_memzero(buf, 512);
+                        __bpf_memzero(buf + 512, 512);
+                        bpf_probe_read(buf, buf_len, (void *)args->u_buf);
+
+                        unsigned char *res = tp_loop_fn(buf, buf_len);
+                        if (res) {
+                            bpf_dbg_printk("Found traceparent in headers [%s]", res);
+                            unsigned char *t_id = extract_trace_id(res);
+                            unsigned char *f_id = extract_flags(res);
+                            unsigned char *s_id = extract_span_id(res);
+                            decode_hex(tp_p->tp.trace_id, t_id, TRACE_ID_CHAR_LEN);
+                            decode_hex((unsigned char *)&tp_p->tp.flags, f_id, FLAGS_CHAR_LEN);
+                            if (meta->type != EVENT_HTTP_CLIENT) {
+                                decode_hex(tp_p->tp.parent_id, s_id, SPAN_ID_CHAR_LEN);
+                            }
+                        }
+                    }
+                }
+                server_or_client_trace(
+                    meta->type, &args->pid_conn.conn, tp_p, args->ssl, args->orig_dport);
+            }
+        }
+    }
 
     if (tp_loop_fn == bpf_strstr_tp_loop) {
         return __obi_continue2_protocol_http(ctx, args, info, meta);
-    } else {
-        bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
     }
 
+    bpf_tail_call(ctx, &jump_table, k_tail_continue2_protocol_http);
     return 0;
 }
 
@@ -680,15 +848,25 @@ __obi_protocol_http(struct pt_regs *ctx, unsigned char *(*tp_loop_fn)(unsigned c
                                k_large_buf_action_init);
         handle_http_response(args->small_buf, &args->pid_conn, info, args->bytes_len);
     } else if (still_reading(info)) {
-        // print here
+        {
+            const u32 prev_len = info->len;
+            info->len += args->bytes_len;
+            if (g_bpf_traceparent_enabled && capture_header_buffer &&
+                prev_len < bpf_max_request_tp_parse_size_kb * 1024) {
+                args->is_append = 1;
+                args->niter = 0;
+                bpf_tail_call(ctx, &jump_table, k_tail_parse_traceparent_http);
+                // tail-call failed — fall through
+            }
+        }
+        // TP parsing not needed or tail-call failed: emit large buffer with
+        // current (stable) trace ID.
         http_send_large_buffer(info,
                                (void *)args->u_buf,
                                args->bytes_len,
                                args->packet_type,
                                args->direction,
                                k_large_buf_action_append);
-
-        info->len += args->bytes_len;
     } else if (still_responding(info)) {
         info->end_monotime_ns = bpf_ktime_get_ns();
         info->resp_len += args->bytes_len;

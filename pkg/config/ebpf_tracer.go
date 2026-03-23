@@ -131,6 +131,8 @@ type EBPFTracer struct {
 	// "legacy" (the slowest, more resource-consuming iterate&delete approach).
 	//nolint:undoc
 	ForceBPFMapReader EBPFMapReader `yaml:"force_bpf_map_reader" env:"OTEL_EBPF_FORCE_BPF_MAP_READER" validate:"oneof=0 1 2" jsonschema:"type=string,enum=auto,enum=batch,enum=legacy"`
+	// Maximum size in kilobytes to parse for traceparent in HTTP requests
+	MaxRequestTPParseSizeKB int `yaml:"max_request_tp_parse_size_kb" env:"OTEL_EBPF_BPF_MAX_REQUEST_TP_PARSE_SIZE_KB" validate:"gte=4,lte=27"`
 }
 
 var nvidiaSMIExistsFunc = nvidiaSMIExists

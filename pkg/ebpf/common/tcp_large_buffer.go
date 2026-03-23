@@ -24,6 +24,10 @@ const (
 )
 
 func appendTCPLargeBuffer(parseCtx *EBPFParseContext, record *ringbuf.Record) (request.Span, bool, error) {
+	if parseCtx == nil || parseCtx.largeBuffers == nil {
+		return request.Span{}, true, nil
+	}
+
 	hdrSize := uint32(unsafe.Sizeof(TCPLargeBufferHeader{})) - uint32(unsafe.Sizeof(uintptr(0))) // Remove `buf` placeholder
 
 	event, err := ReinterpretCast[TCPLargeBufferHeader](record.RawSample)
@@ -82,7 +86,12 @@ func extractTCPLargeBuffer(
 		connInfo:   connInfo,
 	}
 
+	if parseCtx == nil || parseCtx.largeBuffers == nil {
+		return nil, false
+	}
+
 	lb, ok := parseCtx.largeBuffers.Get(key)
+
 	if !ok {
 		if parseCtx.protocolDebug {
 			fmt.Printf("<<< LargeBufferExtract: not found! (packet=%d direction=%d)\n", key.packetType, key.direction)
